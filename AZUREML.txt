@@ -1,0 +1,304 @@
+folder structure and files:
+
+####################################################################################################
+
+function_app/
+	predict/
+		__init__.py
+		function.json
+	host.json
+	predict.py
+	requirements.txt
+
+######################################################################################################
+
+__init__.py
+import json
+import requests
+import os
+import azure.functions as func
+
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        data = req.get_json()
+
+        endpoint = os.environ["ML_ENDPOINT"]
+        key = os.environ["ML_KEY"]
+
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
+        }
+
+        # Call ML endpoint
+        response = requests.post(endpoint, json=data, headers=headers)
+
+        # Return prediction
+        return func.HttpResponse(
+            response.text,
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+	
+
+
+
+function.json
+{
+  "bindings": [
+    {
+      "authLevel": "function",
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "methods": ["post"]
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "$return"
+    }
+  ]
+}
+
+
+
+
+
+host.json
+{
+  "version": "2.0"
+}
+
+
+
+
+requirements.txt
+azure-functions
+requests
+
+
+
+############################################################################################################
+IN NOTEBOOK MAKE THE FOLLOWING FILES:
+environment.yml
+score.py
+housing.csv
+
+###########################################################################################################
+environment.yml
+name: housing-env
+channels:
+  - defaults
+dependencies:
+  - python=3.8
+  - pip
+  - pip:
+      - numpy
+      - pandas
+      - scikit-learn
+      - joblib
+      - azureml-inference-server-http
+
+
+housing.csv
+area,bedrooms,bathrooms,stories,parking,price
+1200,2,1,1,1,300000
+1500,3,2,2,1,500000
+1800,3,2,2,2,600000
+2000,4,3,2,2,750000
+800,1,1,1,0,200000
+2200,4,3,3,2,850000
+1600,3,2,2,1,550000
+1400,2,2,1,1,400000
+1700,3,2,2,2,620000
+900,2,1,1,0,250000
+2500,4,3,3,2,900000
+3000,5,4,3,3,1200000
+1100,2,1,1,1,320000
+1300,2,2,1,1,380000
+2100,4,3,2,2,780000
+1900,3,2,2,2,670000
+1000,2,1,1,1,280000
+2300,4,3,3,2,870000
+2600,5,4,3,3,950000
+2800,5,4,3,3,1100000
+
+score.py
+import json
+import joblib
+import numpy as np
+import os
+
+def init():
+    global model
+    model_path = os.path.join(os.getenv("AZUREML_MODEL_DIR"), "model.pkl")
+    model = joblib.load(model_path)
+
+def run(data):
+    try:
+        if isinstance(data, str):
+            data = json.loads(data)
+
+        features = np.array([[
+            data['area'],
+            data['bedrooms'],
+            data['bathrooms'],
+            data['stories'],
+            data['parking']
+        ]])
+
+        prediction = model.predict(features)
+
+        return {"prediction": float(prediction[0])}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+###################################################################################################################
+
+THEN IN ANOTHER IPYNB FILE RUN THE FOLLOWING CODE CELL BY CELL
+
+#TRAIN
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import joblib
+
+# Load dataset
+df = pd.read_csv("housing.csv")
+
+# Select features (adjust if needed)
+X = df[['area', 'bedrooms', 'bathrooms', 'stories', 'parking']]
+y = df['price']
+
+# Train model
+model = LinearRegression()
+model.fit(X, y)
+
+# Save model
+joblib.dump(model, "model.pkl")
+
+print("✅ Model trained and saved as model.pkl")
+
+
+#################################################
+pip install azure-ai-ml azure-identity
+
+
+
+#################################################
+from azure.ai.ml import MLClient
+from azure.ai.ml.entities import (
+    ManagedOnlineEndpoint,
+    ManagedOnlineDeployment,
+    Environment,
+    Model,
+    CodeConfiguration
+)
+from azure.identity import DefaultAzureCredential
+
+# Connect to workspace
+ml_client = MLClient.from_config(credential=DefaultAzureCredential())
+
+# Register model
+model = ml_client.models.create_or_update(
+    Model(
+        path="model.pkl",
+        name="housing-model"
+    )
+)
+
+# Create environment
+env = ml_client.environments.create_or_update(
+    Environment(
+        name="housing-env",
+        conda_file="environment.yml",
+        image="mcr.microsoft.com/azureml/minimal-ubuntu20.04-py38-cpu-inference:latest"
+    )
+)
+
+# Create endpoint
+endpoint = ManagedOnlineEndpoint(
+    name="housing-endpoint-v2",
+    auth_mode="key"
+)
+
+ml_client.begin_create_or_update(endpoint).result()
+
+# Create deployment
+deployment = ManagedOnlineDeployment(
+    name="blue",
+    endpoint_name="housing-endpoint-v2",
+    model=model,
+    environment=env,
+    code_configuration=CodeConfiguration(
+        code="./",
+        scoring_script="score.py"
+    ),
+    instance_type="Standard_DS1_v2",
+    instance_count=1
+)
+
+ml_client.begin_create_or_update(deployment).result()
+
+# Route traffic
+endpoint.traffic = {"blue": 100}
+ml_client.begin_create_or_update(endpoint).result()
+
+print("🚀 Endpoint deployed!")
+
+#####IT WILL TAKE 15 MINS##########################################
+
+
+endpoint = ml_client.online_endpoints.get("housing-endpoint-v2")
+print(endpoint.scoring_uri)
+
+
+########COPY THE LINK AND REMEMBER#################################
+
+endpoint = ml_client.online_endpoints.get("housing-endpoint-v2")
+
+keys = ml_client.online_endpoints.get_keys("housing-endpoint-v2")
+
+print("🔑 Primary Key:", keys.primary_key)
+print("🔑 Secondary Key:", keys.secondary_key)
+
+##############MAKE NOTE OF THE PRIMARY KEY#########################
+
+NOW CREATE AN AZURE FUNCTION BY CLICKING ON CREATE NEW RESOURCE AND THEN FUNCION APP THEN MAKE SURE TO CHOOSE "APP SERVICE" AS THE HOSTING PLAN AND THEN IN THE RUNTIME CHOOSE PYTHON  ADN THE VERSION TO BE PYTHON 3.10 AND THEN CREATE.
+
+IN THE NEWLY MADE FUNCTION APP GO TO SETTINGS GO TO ENVIRONMENT VARIABLES AND THEN ADD THE FOLLWING KEYS AND VALUES
+ML_ENDPOINT : "THE ENPOINT LINK REMEBERED ABOVE"
+ML_KEY : "THE PRIMARY KEY TO BE REMEBERED ABOVE"
+
+CLICK SAVE.
+
+THEN ZIP ALL THE FILES IN THE FUNCTION_APP FOLDER ABOVE.
+
+THEN GO TO DEPLOYMENT AND THEN TO DEPLOYMENT CENTER AND THEN ON THE SOURCE DROP DOWN CHOOSE PUBLISH FILES(NEW) HERE CHOOSE THE ZIP FILE AND UPLOAD AND WAIT FOR THE NOTFICIATION OF CODE SAVED SUCCESSFULLY.
+
+NOW GO TO OVERVIEW THEN CLICK THE FUNCTION PREDICT THEN CLICK THE "GET FUNCTION URL" AND COPY THE FIRST LINK.
+
+NOW GO TO POSTMAN OR REQBIN AND THEN PASTE THE COPIED LINK AND THEN CHOOSE POST METHOD AND THEN CHOOSE BODY AND THEN PASTE THE FOLLOWING UNDER THE JSON SUBHEADING
+{
+  "area": 1200,
+  "bedrooms": 3,
+  "bathrooms": 2,
+  "stories": 2,
+  "parking": 1
+}
+
+THEN CLICK SEND U WILL RECIEVE RESPONSE AS
+{
+    "prediction": 405826.596682115
+}
+
+
+ 
